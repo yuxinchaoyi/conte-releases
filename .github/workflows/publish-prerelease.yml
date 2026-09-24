@@ -1,0 +1,178 @@
+name: Publish Conte 1.7.16 prerelease
+
+on:
+  push:
+    tags:
+      - 'v1.7.16'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: conte-prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged release
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check tag and packaged assets
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" == "v1.7.16" ]]
+          python3 - "$RELEASE_TAG" <<'PY'
+          import base64, hashlib, json, re, stat, subprocess, sys, tempfile, zipfile
+          from pathlib import Path
+
+          tag = sys.argv[1]
+          version = tag[1:]
+          root = Path("releases") / tag
+          notes = Path("notes") / f"{tag}.md"
+          if not notes.is_file() or notes.is_symlink() or "预发布" not in notes.read_text(encoding="utf-8"):
+              raise SystemExit("Release notes must identify this as a prerelease")
+          if not root.is_dir() or root.is_symlink():
+              raise SystemExit(f"Missing asset directory: {root}")
+          entries = list(root.iterdir())
+          if any(not p.is_file() or p.is_symlink() for p in entries):
+              raise SystemExit("Release directory may contain regular files only")
+          forbidden = re.compile(r"(?:^|--)(?:safari-blue|big-sur|catalina)(?:-preview)?\.jpg$", re.I)
+          latest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
+          token = latest.get("release", "")
+          parts = token.split(".")
+          if len(parts) != 3 or parts[0] != "CXR1":
+              raise SystemExit("Invalid signed release manifest")
+          message = (parts[0] + "." + parts[1]).encode("ascii")
+          payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+          signature = base64.urlsafe_b64decode(parts[2] + "=" * (-len(parts[2]) % 4))
+          if payload.get("product") != "yanxu-research" or payload.get("version") != version:
+              raise SystemExit("Release tag and signed manifest version differ")
+          public_key = ("-----BEGIN PUBLIC KEY-----\n"
+                        "MCowBQYDK2VwAyEAHuddT6o5VirE/iy3+F+4xcaIJaCZQxIcD4qHESDEwUw=\n"
+                        "-----END PUBLIC KEY-----\n")
+          with tempfile.TemporaryDirectory() as temp:
+              key, msg, sig = (Path(temp) / name for name in ("key.pem", "message", "signature"))
+              key.write_text(public_key, encoding="ascii")
+              msg.write_bytes(message)
+              sig.write_bytes(signature)
+              result = subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(key), "-rawin", "-in", str(msg), "-sigfile", str(sig)], capture_output=True)
+              if result.returncode:
+                  raise SystemExit("Ed25519 signature verification failed")
+
+          files = payload.get("files")
+          if not isinstance(files, list):
+              raise SystemExit("Signed file list is missing")
+          expected = {"latest.json", f"yanxu-research-{version}.zip"}
+          paths = set()
+          for item in files:
+              name = item.get("path", "")
+              if not re.fullmatch(r"(?:main\.js|manifest\.json|styles\.css|assets/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:jpg|jpeg|png|svg|webp|gif))", name) or ".." in name:
+                  raise SystemExit(f"Unexpected signed path: {name}")
+              if name in paths:
+                  raise SystemExit(f"Duplicate signed path: {name}")
+              paths.add(name)
+              asset = "assets--" + name[7:] if name.startswith("assets/") else name
+              if forbidden.search(asset):
+                  raise SystemExit(f"Apple-derived wallpaper is forbidden: {asset}")
+              data = (root / asset).read_bytes()
+              if len(data) != item.get("size") or hashlib.sha256(data).hexdigest() != item.get("sha256"):
+                  raise SystemExit(f"Signed file hash mismatch: {asset}")
+              expected.add(asset)
+          if not {"main.js", "manifest.json", "styles.css"}.issubset(paths):
+              raise SystemExit("Signed plugin package is incomplete")
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          if manifest.get("id") != "yanxu-research" or manifest.get("version") != version:
+              raise SystemExit("Plugin manifest does not match tag")
+          xpis = [p.name for p in entries if p.name == "conte-zotero-1.2.2.xpi"]
+          if len(xpis) != 1:
+              raise SystemExit("Expected the Zotero 1.2.2 XPI")
+          expected.add("conte-zotero-1.2.2.xpi")
+          if {p.name for p in entries} != expected:
+              raise SystemExit("Release directory contains missing or unapproved files")
+          if any(forbidden.search(p.name) for p in entries):
+              raise SystemExit("Apple-derived wallpaper is forbidden")
+
+          private_path = re.compile(r"(?:^|/)(?:\.env(?:\..*)?|[^/]*\.(?:pem|key)|data\.json|licenses\.sqlite(?:-wal|-shm)?|\.obsidian|src|scripts|tests|node_modules)(?:/|$)", re.I)
+          zip_path = root / f"yanxu-research-{version}.zip"
+          expected_zip = {"yanxu-research/" + name for name in paths} | {"yanxu-research/第三方许可.txt"}
+          with zipfile.ZipFile(zip_path) as archive:
+              if len(archive.namelist()) != len(set(archive.namelist())) or set(archive.namelist()) != expected_zip or archive.testzip():
+                  raise SystemExit("Customer ZIP must contain only the signed plugin files and third-party license")
+              for item in archive.infolist():
+                  mode = item.external_attr >> 16
+                  if ".." in Path(item.filename).parts or item.filename.startswith("/") or forbidden.search(Path(item.filename).name) or private_path.search(item.filename) or stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                      raise SystemExit(f"Forbidden ZIP entry: {item.filename}")
+                  content = archive.read(item)
+                  if b"-----BEGIN PRIVATE KEY-----" in content or b"licenses.sqlite" in content:
+                      raise SystemExit(f"Private key or authorization database marker in ZIP: {item.filename}")
+          for item in entries:
+              data = item.read_bytes()
+              if b"-----BEGIN PRIVATE KEY-----" in data or b"licenses.sqlite" in data:
+                  raise SystemExit(f"Private key or authorization database marker: {item.name}")
+          print(f"Package checks passed: {len(expected)} allowlisted prerelease assets")
+          PY
+
+      - name: Create or safely resume prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, time, urllib.error, urllib.request
+          from pathlib import Path
+
+          repo, tag = os.environ["GH_REPO"], os.environ["RELEASE_TAG"]
+          root = Path("releases") / tag
+          expected = {p.name: "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir()}
+          endpoint = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+          headers = {"Accept": "application/vnd.github+json", "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                     "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "conte-prerelease-publisher"}
+          def get_release():
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers), timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return None
+                  raise RuntimeError(f"GitHub release lookup failed: HTTP {error.code}")
+          release = get_release()
+          if release is None:
+              subprocess.run(["gh", "release", "create", tag, *[str(root / name) for name in sorted(expected)],
+                              "--repo", repo, "--title", "Conte 1.7.16", "--notes-file", f"notes/{tag}.md",
+                              "--prerelease", "--verify-tag"], check=True)
+          else:
+              if release.get("draft") or not release.get("prerelease") or release.get("tag_name") != tag:
+                  raise RuntimeError("Existing release is not the expected prerelease")
+              existing = {}
+              for asset in release.get("assets", []):
+                  name, digest = asset.get("name"), asset.get("digest")
+                  if name not in expected or digest != expected[name]:
+                      raise RuntimeError(f"Existing asset mismatch; refusing overwrite: {name}")
+                  existing[name] = digest
+              missing = sorted(set(expected) - set(existing))
+              if missing:
+                  subprocess.run(["gh", "release", "upload", tag, *[str(root / name) for name in missing], "--repo", repo], check=True)
+          deadline = time.time() + 90
+          while time.time() < deadline:
+              release = get_release()
+              if release and release.get("prerelease") and not release.get("draft"):
+                  observed = {item.get("name"): item.get("digest") for item in release.get("assets", [])}
+                  if observed == expected:
+                      print(f"Prerelease ready: {len(expected)} assets verified by SHA-256")
+                      break
+                  if set(observed) - set(expected) or any(observed.get(k) not in (None, v) for k, v in expected.items()):
+                      raise RuntimeError("GitHub release contains extra or conflicting assets")
+              time.sleep(3)
+          else:
+              raise RuntimeError("Timed out waiting for release assets to finish uploading")
+          PY

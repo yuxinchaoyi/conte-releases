@@ -1,9 +1,9 @@
-name: Publish Conte 1.7.22 prerelease
+name: Publish Conte 1.7.23 prerelease
 
 on:
   push:
     tags:
-      - 'v1.7.22'
+      - 'v1.7.23'
 
 permissions:
   contents: write
@@ -27,7 +27,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" == "v1.7.22" ]]
+          [[ "$RELEASE_TAG" == "v1.7.23" ]]
           python3 - "$RELEASE_TAG" <<'PY'
           import base64, hashlib, json, re, stat, subprocess, sys, tempfile, zipfile
           from pathlib import Path
@@ -148,7 +148,7 @@ jobs:
           release = get_release()
           if release is None:
               subprocess.run(["gh", "release", "create", tag, *[str(root / name) for name in sorted(expected)],
-                              "--repo", repo, "--title", "Conte 1.7.22", "--notes-file", f"notes/{tag}.md",
+                              "--repo", repo, "--title", "Conte 1.7.23", "--notes-file", f"notes/{tag}.md",
                               "--prerelease", "--verify-tag"], check=True)
           else:
               if release.get("draft") or not release.get("prerelease") or release.get("tag_name") != tag:

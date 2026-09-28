@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 72" fill="none">
+  <title>Conte</title>
+  <g stroke="currentColor" stroke-width="5.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M43 19C38 13 32 10 25 10C11 10 4 20 4 36S12 62 25 62C33 62 39 59 44 53"/>
+    <path d="M84 42C84 30 78 23 69 23S54 30 54 42S60 62 69 62S84 54 84 42Z"/>
+    <path d="M98 61V25M98 41C98 30 104 23 113 23C122 23 128 29 128 40V61"/>
+    <path d="M147 12V50C147 59 152 64 162 60M137 25H161"/>
+    <path d="M174 42H204C204 30 198 23 189 23C179 23 173 31 173 42S180 62 190 62C196 62 201 59 204 56"/>
+  </g>
+</svg>
